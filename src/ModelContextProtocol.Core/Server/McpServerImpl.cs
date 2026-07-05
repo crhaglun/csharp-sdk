@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.ExceptionSummarization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
@@ -21,6 +22,7 @@ internal sealed partial class McpServerImpl : McpServer
     };
 
     private readonly ILogger _logger;
+    private readonly IExceptionSummarizer? _exceptionSummarizer;
     private readonly ITransport _sessionTransport;
     private readonly bool _servicesScopePerRequest;
     private readonly List<Action> _disposables = [];
@@ -76,6 +78,7 @@ internal sealed partial class McpServerImpl : McpServer
         _endpointName = _serverOnlyEndpointName;
         _servicesScopePerRequest = options.ScopeRequests;
         _logger = loggerFactory?.CreateLogger<McpServer>() ?? NullLogger<McpServer>.Instance;
+        _exceptionSummarizer = options.ExceptionSummarizer;
 
         _clientInfo = options.KnownClientInfo;
         _clientCapabilities = options.KnownClientCapabilities;
@@ -147,7 +150,8 @@ internal sealed partial class McpServerImpl : McpServer
             _notificationHandlers,
             incomingMessageFilter,
             outgoingMessageFilter,
-            _logger);
+            _logger,
+            options.ExceptionSummarizer);
     }
 
     /// <summary>
@@ -996,7 +1000,7 @@ internal sealed partial class McpServerImpl : McpServer
                 }
                 catch (Exception e)
                 {
-                    ReadResourceError(request.Params?.Uri ?? string.Empty, e);
+                    LogReadResourceError(request.Params?.Uri ?? string.Empty, e);
                     throw;
                 }
             });
@@ -1110,7 +1114,7 @@ internal sealed partial class McpServerImpl : McpServer
                 }
                 catch (Exception e)
                 {
-                    GetPromptError(request.Params?.Name ?? string.Empty, e);
+                    LogGetPromptError(request.Params?.Name ?? string.Empty, e);
                     throw;
                 }
             });
@@ -1480,7 +1484,7 @@ internal sealed partial class McpServerImpl : McpServer
                 // not an error (tools throw it to signal an InputRequiredResult).
                 if (!(e is OperationCanceledException && cancellationToken.IsCancellationRequested) && e is not InputRequiredException)
                 {
-                    ToolCallError(request.Params?.Name ?? string.Empty, e);
+                    LogToolCallError(request.Params?.Name ?? string.Empty, e);
                 }
 
                 if ((e is OperationCanceledException && cancellationToken.IsCancellationRequested) || e is McpProtocolException || e is InputRequiredException)
@@ -1527,7 +1531,7 @@ internal sealed partial class McpServerImpl : McpServer
                 // not an error (tools throw it to signal an InputRequiredResult).
                 if (!(e is OperationCanceledException && cancellationToken.IsCancellationRequested) && e is not InputRequiredException)
                 {
-                    ToolCallError(request.Params?.Name ?? string.Empty, e);
+                    LogToolCallError(request.Params?.Name ?? string.Empty, e);
                 }
 
                 if ((e is OperationCanceledException && cancellationToken.IsCancellationRequested) || e is McpProtocolException || e is InputRequiredException)
@@ -2194,8 +2198,50 @@ internal sealed partial class McpServerImpl : McpServer
         }
     }
 
+    private void LogToolCallError(string toolName, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            ToolCallErrorSummary(toolName, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            ToolCallError(toolName, exception);
+        }
+    }
+
+    private void LogGetPromptError(string promptName, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            GetPromptErrorSummary(promptName, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            GetPromptError(promptName, exception);
+        }
+    }
+
+    private void LogReadResourceError(string resourceUri, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            ReadResourceErrorSummary(resourceUri, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            ReadResourceError(resourceUri, exception);
+        }
+    }
+
     [LoggerMessage(Level = LogLevel.Error, Message = "\"{ToolName}\" threw an unhandled exception.")]
     private partial void ToolCallError(string toolName, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "\"{ToolName}\" threw an unhandled exception. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void ToolCallErrorSummary(string toolName, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "\"{ToolName}\" completed. IsError = {IsError}.")]
     private partial void ToolCallCompleted(string toolName, bool isError);
@@ -2203,11 +2249,17 @@ internal sealed partial class McpServerImpl : McpServer
     [LoggerMessage(Level = LogLevel.Error, Message = "GetPrompt \"{PromptName}\" threw an unhandled exception.")]
     private partial void GetPromptError(string promptName, Exception exception);
 
+    [LoggerMessage(Level = LogLevel.Error, Message = "GetPrompt \"{PromptName}\" threw an unhandled exception. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void GetPromptErrorSummary(string promptName, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "GetPrompt \"{PromptName}\" completed.")]
     private partial void GetPromptCompleted(string promptName);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "ReadResource \"{ResourceUri}\" threw an unhandled exception.")]
     private partial void ReadResourceError(string resourceUri, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "ReadResource \"{ResourceUri}\" threw an unhandled exception. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void ReadResourceErrorSummary(string resourceUri, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "ReadResource \"{ResourceUri}\" completed.")]
     private partial void ReadResourceCompleted(string resourceUri);

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Diagnostics.ExceptionSummarization;
 using ModelContextProtocol.Protocol;
 using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
@@ -184,4 +185,14 @@ public sealed class McpClientOptions
             field = value;
         }
     } = 60;
+
+    /// <summary>
+    /// Gets or sets an optional exception summarizer for sanitizing exception details in client-side logs.
+    /// </summary>
+    /// <remarks>
+    /// When set, exception log entries will include the summarized exception type, description, additional details,
+    /// and stack trace instead of the raw exception object. This is useful for avoiding leakage of sensitive
+    /// information in production logs.
+    /// </remarks>
+    public IExceptionSummarizer? ExceptionSummarizer { get; set; }
 }

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Diagnostics.ExceptionSummarization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
@@ -103,6 +104,7 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
     /// </summary>
     private readonly ConcurrentDictionary<RequestId, CancellationTokenSource> _handlingRequests = new();
     private readonly ILogger _logger;
+    private readonly IExceptionSummarizer? _exceptionSummarizer;
 
     // This _sessionId is solely used to identify the session in telemetry and logs.
     private readonly string _sessionId = Guid.NewGuid().ToString("N");
@@ -123,6 +125,7 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
     /// <param name="incomingMessageFilter">A filter that wraps incoming message processing. Takes the next handler and returns a wrapped handler. If null, a passthrough filter is used.</param>
     /// <param name="outgoingMessageFilter">A filter that wraps outgoing message processing. Takes the next handler and returns a wrapped handler. If null, a passthrough filter is used.</param>
     /// <param name="logger">The logger.</param>
+    /// <param name="exceptionSummarizer">Optional exception summarizer for sanitizing exception details in logs.</param>
     public McpSessionHandler(
         bool isServer,
         ITransport transport,
@@ -131,7 +134,8 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
         NotificationHandlers notificationHandlers,
         JsonRpcMessageFilter? incomingMessageFilter,
         JsonRpcMessageFilter? outgoingMessageFilter,
-        ILogger logger)
+        ILogger logger,
+        IExceptionSummarizer? exceptionSummarizer)
     {
         Throw.IfNull(transport);
 
@@ -152,6 +156,7 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
         _incomingMessageFilter = incomingMessageFilter ?? (next => next);
         _outgoingMessageFilter = outgoingMessageFilter ?? (next => next);
         _logger = logger;
+        _exceptionSummarizer = exceptionSummarizer;
 
         // ping was removed in the 2026-07-28 protocol revision (SEP-2575). On the 2026-07-28 or later version,
         // return MethodNotFound; on an older version, the per-spec behavior is to always answer
@@ -333,11 +338,11 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
                         {
                             if (_logger.IsEnabled(LogLevel.Trace))
                             {
-                                LogMessageHandlerExceptionSensitive(EndpointName, message.GetType().Name, JsonSerializer.Serialize(message, McpJsonUtilities.JsonContext.Default.JsonRpcMessage), ex);
+                                LogMessageExceptionSensitive(EndpointName, message.GetType().Name, JsonSerializer.Serialize(message, McpJsonUtilities.JsonContext.Default.JsonRpcMessage), ex);
                             }
                             else
                             {
-                                LogMessageHandlerException(EndpointName, message.GetType().Name, ex);
+                                LogMessageException(EndpointName, message.GetType().Name, ex);
                             }
                         }
                     }
@@ -478,7 +483,7 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    LogRequestHandlerException(EndpointName, request.Method, GetElapsed(requestStartingTimestamp).TotalMilliseconds, ex);
+                    LogRequestException(EndpointName, request.Method, GetElapsed(requestStartingTimestamp).TotalMilliseconds, ex);
                     throw;
                 }
 
@@ -1023,6 +1028,54 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Logs a request handler exception, using a summarized description when an exception summarizer is configured.
+    /// </summary>
+    private void LogRequestException(string endpointName, string method, double elapsedMilliseconds, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            LogRequestHandlerExceptionSummary(endpointName, method, elapsedMilliseconds, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            LogRequestHandlerException(endpointName, method, elapsedMilliseconds, exception);
+        }
+    }
+
+    /// <summary>
+    /// Logs a message handler exception, using a summarized description when an exception summarizer is configured.
+    /// </summary>
+    private void LogMessageException(string endpointName, string messageType, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            LogMessageHandlerExceptionSummary(endpointName, messageType, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            LogMessageHandlerException(endpointName, messageType, exception);
+        }
+    }
+
+    /// <summary>
+    /// Logs a message handler exception with sensitive message details, using a summarized description when an exception summarizer is configured.
+    /// </summary>
+    private void LogMessageExceptionSensitive(string endpointName, string messageType, string message, Exception exception)
+    {
+        if (_exceptionSummarizer is { } summarizer)
+        {
+            var summary = summarizer.Summarize(exception);
+            LogMessageHandlerExceptionSensitiveSummary(endpointName, messageType, message, summary.ExceptionType, summary.Description, summary.AdditionalDetails, exception.StackTrace);
+        }
+        else
+        {
+            LogMessageHandlerExceptionSensitive(endpointName, messageType, message, exception);
+        }
+    }
+
     private static void AddExceptionTags(ref TagList tags, Activity? activity, Exception e)
     {
         if (e is AggregateException ae && ae.InnerException is not null and not AggregateException)
@@ -1323,6 +1376,15 @@ internal sealed partial class McpSessionHandler : IAsyncDisposable
 
     [LoggerMessage(Level = LogLevel.Trace, Message = "{EndpointName} message handler {MessageType} failed. Message: '{Message}'.")]
     private partial void LogMessageHandlerExceptionSensitive(string endpointName, string messageType, string message, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{EndpointName} method '{Method}' request handler failed in {ElapsedMilliseconds}ms. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void LogRequestHandlerExceptionSummary(string endpointName, string method, double elapsedMilliseconds, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{EndpointName} message handler {MessageType} failed. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void LogMessageHandlerExceptionSummary(string endpointName, string messageType, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
+
+    [LoggerMessage(Level = LogLevel.Trace, Message = "{EndpointName} message handler {MessageType} failed. Message: '{Message}'. ExceptionType: {ExceptionType}. Description: {Description}. AdditionalDetails: {AdditionalDetails}. StackTrace: {StackTrace}")]
+    private partial void LogMessageHandlerExceptionSensitiveSummary(string endpointName, string messageType, string message, string exceptionType, string? description, string? additionalDetails, string? stackTrace);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "{EndpointName} received unexpected {MessageType} message type.")]
     private partial void LogEndpointHandlerUnexpectedMessageType(string endpointName, string messageType);

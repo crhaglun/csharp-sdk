@@ -64,7 +64,8 @@ internal sealed partial class McpClientImpl : McpClient
             notificationHandlers,
             incomingMessageFilter: null,
             outgoingMessageFilter: null,
-            _logger);
+            _logger,
+            exceptionSummarizer: options.ExceptionSummarizer);
 
         ToolDiscovered = tool => _toolCache[tool.Name] = tool;
         ToolRejected = (tool, reason) => LogToolRejected(tool.Name, reason);
